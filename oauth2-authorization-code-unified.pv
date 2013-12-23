@@ -1,0 +1,325 @@
+(* *************************************************************************
+   *** OAuth 2.0 draft 22 verification				 	 				 ***
+   *** 								 	 								 ***
+   *** Marco De Nadai (86873) 					     	 				 ***
+   *********************************************************************** *)
+
+   
+(* *************************************************************************
+   * DEFINITIONS							   							   *
+   *********************************************************************** *)
+(* public channel *)
+	free net:channel.
+	(* it helps to simulate the instauration of a TLS channel *)
+	free TLS_pass:channel [private].
+	
+(* Message numbers *)
+	const c1, c2, c3, c4, c5:bitstring.
+
+(* Messages *)
+	const client_page_url:bitstring.
+	const response_type:bitstring.
+	const redirect_uri:bitstring.
+	const resource_uri:bitstring.
+	const grant_type:bitstring.
+	const token_type_bearer:bitstring.
+	const token_type_mac:bitstring.
+	const mac_algorithm:bitstring.
+
+	type mac.
+	type nonce.
+	type Token.
+	type RefreshToken.
+
+	(* EXAMPLE: a registered client. Single for test *)
+	free A_client_id:bitstring.
+	free A_client_password:bitstring [private].
+	free B_client_id:bitstring.
+	free B_client_password:bitstring [private].
+
+(* tables *)
+	(* token-mac_keys list: simulate the communication between RS and AS  *)
+	table mac_keys(Token, bitstring).
+	(* Auth codes issued by AS: simulate the AS database *)
+	table AuthCodes(bitstring, bitstring, bitstring).
+	(* Refresh Token issued: simulate the AS database *)
+	table RefreshTokens(bitstring, RefreshToken).
+	(* registered clients in AS *)
+	table RegisteredClients(bitstring, bitstring).
+
+(* type converter *)
+	fun Token_to_bitstring(Token):bitstring[data,typeConverter].
+	fun RefreshToken_to_bitstring(RefreshToken):bitstring[data,typeConverter].
+
+(* the cryptographic constructors *)
+	(* enc for secrecy test *)
+	fun senc(bitstring, bitstring):bitstring.
+	reduc forall x:bitstring, y:bitstring; sdec(senc(x,y),y) = x.
+	(* function for resource *)
+	fun resourcecontent(bitstring):bitstring.
+	(* mac for resource request *)
+	fun hmac_sha_256(bitstring, bitstring): mac.
+	(* encode channel *)
+	fun enc(channel, bitstring): bitstring.
+	reduc forall m:channel, k:bitstring; dec(enc(m,k),k) = m.
+
+(* Resource function *)
+	fun F(bitstring):bitstring.
+
+(* events *)
+	event auth_request(bitstring).
+	event auth_accepted(bitstring, bitstring).
+	event token_request(bitstring, bitstring).
+	event token_grant(bitstring, bitstring, Token, RefreshToken).
+	event resource_request(Token, mac).
+	event resource_accepted(Token, mac).
+	event token_refresh(bitstring, RefreshToken).
+	event token_refreshed(bitstring, RefreshToken).
+
+	
+(* *************************************************************************
+   * QUERIES								   							   *
+   *********************************************************************** *)
+
+
+(* Secrecy queries *)
+	free secretMACKeyC, secretMACKey2C, secretTokenC, secretTokenRefreshC, secretTokenRefreshedC, secretTokenAS, secretTokenRefreshedAS, secretTokenRefreshAS1, secretTokenRefreshAS2, secretMACKeyAS, secretMACKey2AS, secretTokenRS, secretMACKeyRS: bitstring[private].
+
+	query	attacker(A_client_password);
+			(* attacker(secretTokenC); *)
+			attacker(secretMACKeyC);
+			attacker(secretTokenRefreshC);
+			attacker(secretMACKey2C);
+			(* attacker(secretTokenRefreshedC); *)
+			(* attacker(secretTokenAS); *)
+			attacker(secretTokenRefreshAS1);
+			(* attacker(secretTokenRefreshedAS); *)
+			attacker(secretTokenRefreshAS2);
+			attacker(secretMACKeyAS);
+			attacker(secretMACKey2AS);
+			(* attacker(secretTokenRS); *)
+			attacker(secretMACKeyRS).
+	(* we suppose that we can pass the TLS channel without being attacked *)
+	not		attacker(TLS_pass).
+
+(* *************************************************************************
+   * USER AGENT: browser of the resource owner				   			   *
+   *********************************************************************** *)
+let UserAgent() =
+
+	(* request client's page *)
+		out(net, client_page_url);
+
+	(* get client's page *)
+		in(net, (client_id:bitstring, client_redirect_uri:bitstring));
+
+	(* TLS: establish connection *)
+		in(TLS_pass, TLSchannel1:channel);
+
+	(* authorization request *)
+		event auth_request(client_id);
+		out(TLSchannel1, (response_type, client_id, client_redirect_uri, c1));
+	
+	(* authorization response *)
+		in(net, code:bitstring);
+
+	(* I pass the authorization code to the client *)
+		out(net, code);
+
+	(* I get the resource *)
+		in(net, resource:bitstring);
+
+
+	0.
+
+	
+(* *************************************************************************
+   * CLIENT: for example a third part application			   			   *
+   *********************************************************************** *)
+let client(X_client_id:bitstring, X_client_password:bitstring) =
+
+	(* get client's page request *)
+		in(net, =client_page_url);
+
+	(* authorization endpoint *)
+		(* pkS is the AS server *)
+		out(net, (X_client_id, redirect_uri));
+	
+	(* I get the authorization code from the UserAgent *)
+		in(net, code:bitstring);
+
+	(* token request *)
+		(* TLS: establish connection *)
+		new TLSchannel2: channel;
+		out(TLS_pass, TLSchannel2);
+		event token_request(A_client_id, code);
+		out(TLSchannel2, (grant_type, X_client_id, X_client_password, code, redirect_uri, c2));
+
+	(* token response *)
+		in(TLSchannel2, (token_code:Token, =token_type, mac_key:bitstring, =mac_algorithm, refresh_token:RefreshToken, =c3));
+		
+	(* resource request *)
+		new N:nonce;
+		(* I build the normalized string for HMAC generation *)
+		let(normalized_string:bitstring) = (N, resource_uri) in
+	
+		let mac_string = hmac_sha_256(normalized_string, mac_key) in 
+		event resource_request(token_code, mac_string);
+		out(net, (resource_uri, token_code, N, mac_string));
+
+	(* resource response *)
+		in(net, resource:bitstring);
+
+	(* send resource to the useragent *)
+		out(net, F(resource));
+
+	(* refreshToken request *)
+		(* TLS: establish connection *)
+		new TLSchannel3: channel;
+		out(TLS_pass, TLSchannel3);
+		event token_refresh(X_client_id, refresh_token);
+		out(TLSchannel3, (grant_type, X_client_id, X_client_password, refresh_token, c4));
+	
+	(* refreshToken response *)
+		in(TLSchannel3, (token_code2:Token, =token_type, mac_key2:bitstring, =mac_algorithm, refresh_token2:RefreshToken, =c5));
+		
+		
+
+	(* test secrecy *)
+		(* out(net, senc(secretTokenC, Token_to_bitstring(token_code))); *)
+		out(net, senc(secretTokenRefreshC, RefreshToken_to_bitstring(refresh_token)));
+		(* out(net, senc(secretTokenRefreshedC, Token_to_bitstring(token_code2))); *)
+		out(net, senc(secretMACKeyC, mac_key));
+		out(net, senc(secretMACKey2C, mac_key2));
+
+		
+	0.
+
+	
+(* *************************************************************************
+   * AUTHORIZATION SERVER: grants authorization and token codes		   	   *
+   *********************************************************************** *)
+	
+	
+let authserver_AuthCode() =
+
+	(* TLS: establish connection *)
+		new TLSchannel1: channel;
+		out(TLS_pass, TLSchannel1);
+	
+	(* authorization request *)
+		in(TLSchannel1, (=response_type, client_id:bitstring, client_redirect_uri:bitstring, =c1));
+		(* check authorized clients *)
+		get RegisteredClients(=client_id, client_password) in
+
+	(* authorization response *)
+		new auth_code:bitstring;
+		event auth_accepted(client_id, auth_code);
+		out(net, auth_code);	
+		insert AuthCodes(auth_code, client_id, client_redirect_uri);
+		
+	0.
+
+
+let authserver_TokenCode() =
+
+	(* token request *)
+		(* TLS: establish connection *)
+		in(TLS_pass, TLSchannel2:channel);
+		
+		in(TLSchannel2, (=grant_type, client_id:bitstring, client_password:bitstring, auth_code:bitstring, client_redirect_uri:bitstring, =c2));
+		(* check authorized clients *)
+		get RegisteredClients(=client_id, =client_password) in
+		get AuthCodes(=auth_code, =client_id, =client_redirect_uri) in
+	
+	(* token response *)
+		new token_code:Token;
+		new refreshToken_code:RefreshToken;
+		new mac_key: bitstring;
+
+		event token_grant(client_id, auth_code, token_code, refreshToken_code);
+		out(TLSchannel2, (token_code, token_type, mac_key, mac_algorithm, refreshToken_code, c3));
+	
+		(* mac_key exchange between authserver and resourceserver *)
+		insert mac_keys(token_code, mac_key);
+		insert RefreshTokens(client_id, refreshToken_code);
+
+	(* test secrecy *)
+		(* out(net, senc(secretTokenAS, Token_to_bitstring(token_code))); *)
+		out(net, senc(secretTokenRefreshAS1, RefreshToken_to_bitstring(refreshToken_code)));
+		out(net, senc(secretMACKeyAS, mac_key));
+
+
+	0.
+
+
+let authserver_TokenCodeRefresh() =
+
+	(* refreshToken request *)
+		(* TLS: establish connection *)
+		in(TLS_pass, TLSchannel3:channel);
+		
+		in(TLSchannel3, (=grant_type, client_id:bitstring, client_password:bitstring, refreshToken_code_old:RefreshToken, =c4));
+		(* check authorized clients *)
+		get RegisteredClients(=client_id, =client_password) in
+		get RefreshTokens(=client_id, =refreshToken_code_old) in
+
+	(* refreshToken response *)
+		new token_code:Token;
+		new mac_key: bitstring;
+
+		event token_refreshed(client_id, refreshToken_code_old);
+		(* I fetch auth_code only for event purpouse *)
+		get AuthCodes(auth_code, =client_id, client_redirect_uri) in
+		event token_grant(client_id, auth_code, token_code, refreshToken_code_old);
+		out(TLSchannel3, (token_code, token_type, mac_key, mac_algorithm, refreshToken_code_old, c5));
+	
+		(* mac_key exchange between authserver and resourceserver *)
+		insert mac_keys(token_code, mac_key);
+
+	(* test secrecy *)
+		(* out(net, senc(secretTokenRefreshedAS, Token_to_bitstring(token_code))); *)
+		out(net, senc(secretTokenRefreshAS2, RefreshToken_to_bitstring(refreshToken_code_old)));
+		out(net, senc(secretMACKey2AS, mac_key));
+
+	
+	0.
+
+let authserver() = 
+	
+	((authserver_AuthCode()) | (authserver_TokenCode()) | (authserver_TokenCodeRefresh()))
+	
+	.
+
+(* *************************************************************************
+   * RESOURCE SERVER: a server that hosts a resource			   		   *
+   *********************************************************************** *)
+let resourceserver() =
+
+	(* resource request *)
+		in(net, (resource_url:bitstring, token_code:Token, N:nonce, mac_string:mac));
+		(* I build the normalized string for HMAC generation *)
+		let(normalized_string:bitstring) = (N, resource_url) in
+
+		(* mac_key exchange between authserver and resourceserver *)
+		get mac_keys(=token_code, mac_key) in
+
+		(* check of mac code *)
+		let (=mac_string) = hmac_sha_256(normalized_string, mac_key) in 
+		event resource_accepted(token_code, mac_string);	
+		out(net, resourcecontent(resource_url));
+
+	(* test secrecy *)
+		(* out(net, senc(secretTokenRS, Token_to_bitstring(token_code))); *)
+		out(net, senc(secretMACKeyRS, mac_key));
+		
+	0.
+
+
+ process
+	(* register a client into AS *)
+	insert RegisteredClients(A_client_id, A_client_password);
+
+	( (!UserAgent()) | (!authserver()) | (!client(A_client_id, A_client_password)) | (!resourceserver()) )
+
+
